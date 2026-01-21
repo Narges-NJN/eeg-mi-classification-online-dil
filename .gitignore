@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# OS/editor
+.DS_Store
+.vscode/
+
+# Outputs/data
+outputs/
+mne_data/
+*.edf
+*.fif
+
+# Jupyter (if any)
+.ipynb_checkpoints/
