@@ -12,6 +12,54 @@ from plots import plot_domain_incremental, plot_loso
 from utils import ensure_dir, save_json
 
 
+# ---------------------------
+# Ablation presets (Table 4.1 – Online DI, EEGNet)
+# ---------------------------
+ABLATION_CASES = {
+    # Baseline
+    "baseline": {},
+
+    # Learning rate
+    "lr_1e-3": {"lr": "1e-3"},
+    "lr_3e-2": {"lr": "3e-2"},
+
+    # Weight decay
+    "wd_0": {"weight_decay": "0"},
+    "wd_1e-4": {"weight_decay": "1e-4"},
+    "wd_1e-2": {"weight_decay": "1e-2"},
+
+    # Batch size
+    "bs_4": {"batch_size": "4"},
+    "bs_16": {"batch_size": "16"},
+
+    # Dropout
+    "drop_0.25": {"drop_prob": "0.25"},
+    "drop_0.50": {"drop_prob": "0.50"},
+
+    # Temporal filters (F1)
+    "F1_4": {"F1": "4"},
+    "F1_16": {"F1": "16"},
+
+    # Spatial filters (D)
+    "D_1": {"D": "1"},
+    "D_4": {"D": "4"},
+
+    # Temporal kernel length
+    "klen_32": {"kernel_length": "32"},
+    "klen_128": {"kernel_length": "128"},
+
+    # Depthwise kernel length
+    "dwklen_8": {"depthwise_kernel_length": "8"},
+    "dwklen_32": {"depthwise_kernel_length": "32"},
+
+    # Pooling mode
+    "pool_max": {"pool_mode": "max"},
+
+    # BatchNorm momentum
+    "bnmom_0.10": {"batch_norm_momentum": "0.10"},
+}
+
+
 def _summary_di(title: str, out: Dict[str, Any]) -> str:
     return (
         f"{title}\n"
@@ -144,6 +192,16 @@ def main():
         default="run",
         help="Output folder tag prefix (e.g., ablation name)",
     )
+
+    parser.add_argument(
+        "--ablation",
+        choices=sorted(ABLATION_CASES.keys()),
+        default=None,
+        help=(
+            "Ablation preset (Table 4.1). Applied BEFORE --set overrides. "
+            "Intended for --exp online."
+        ),
+    )
     parser.add_argument(
         "--set",
         nargs="*",
@@ -154,6 +212,15 @@ def main():
     args = parser.parse_args()
 
     cfg = Config()
+
+    # Apply preset ablation first (then allow --set to refine further)
+    if args.ablation is not None:
+        cfg = apply_overrides(cfg, ABLATION_CASES[args.ablation])
+
+        # If user didn't choose a custom tag, use the ablation name
+        if args.tag == "run":
+            args.tag = f"ablation_{args.ablation}"
+
     overrides = _parse_set_args(args.set)
     cfg = apply_overrides(cfg, overrides)
 

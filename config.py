@@ -9,7 +9,7 @@ class Config:
     # DATA
     # -----------------------
     data_path: str = "~/mne_data/"
-    subjects: List[int] = field(default_factory=lambda: list(range(1, 81)))
+    subjects: List[int] = field(default_factory=lambda: list(range(1, 11)))
 
     # Domain-Incremental (DI) protocol (matches better code)
     di_train_runs: List[int] = field(default_factory=lambda: [4, 8])
@@ -50,6 +50,15 @@ class Config:
     # MODEL (EEGNet as requested)
     # -----------------------
     drop_prob: float = 0.0
+
+    # EEGNet architectural hyperparameters (for ablations)
+    # Baseline values correspond to Table 4.1 (Online DI, EEGNet)
+    F1: int = 8
+    D: int = 2
+    kernel_length: int = 64
+    depthwise_kernel_length: int = 16
+    pool_mode: str = "mean"  # "mean" or "max"
+    batch_norm_momentum: float = 0.01
 
     # -----------------------
     # TRAINING (match better code for DI)
