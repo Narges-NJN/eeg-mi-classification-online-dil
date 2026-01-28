@@ -1,77 +1,66 @@
-from typing import Dict, Any, Tuple, Optional
+# train_utils.py
+from typing import Dict, Tuple
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
 
-class EEGDataset(Dataset):
-    def __init__(self, X: np.ndarray, y: np.ndarray):
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.y = torch.tensor(y, dtype=torch.long)
 
-    def __len__(self):
-        return int(self.X.shape[0])
-
-    def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
-
-def make_loader(X: np.ndarray, y: np.ndarray, batch_size: int, shuffle: bool) -> DataLoader:
-    ds = EEGDataset(X, y)
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)
-
-@torch.no_grad()
-def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -> Dict[str, Any]:
-    model.eval()
-    losses = []
-    all_y = []
-    all_pred = []
-    all_prob = []
-
-    for xb, yb in loader:
-        xb = xb.to(device)
-        yb = yb.to(device)
-
-        logits = model(xb)
-        loss = F.cross_entropy(logits, yb)
-        prob = torch.softmax(logits, dim=1)
-        pred = torch.argmax(prob, dim=1)
-
-        losses.append(loss.item())
-        all_y.append(yb.detach().cpu().numpy())
-        all_pred.append(pred.detach().cpu().numpy())
-        all_prob.append(prob.detach().cpu().numpy())
-
-    y = np.concatenate(all_y)
-    pred = np.concatenate(all_pred)
-    prob = np.concatenate(all_prob)
-
-    acc = float((pred == y).mean())
-    return {"loss": float(np.mean(losses)), "acc": acc, "y": y, "pred": pred, "prob": prob}
-
-def train_one_epoch(model: torch.nn.Module, loader: DataLoader, optimizer: torch.optim.Optimizer,
-                    device: torch.device, grad_clip: Optional[float]) -> Dict[str, float]:
+def train_one_epoch(model, dataloader, criterion, optimizer, device: str) -> Tuple[float, float]:
     model.train()
-    losses = []
+    total_loss = 0.0
     correct = 0
     total = 0
 
-    for xb, yb in loader:
-        xb = xb.to(device)
+    for Xb, yb in dataloader:
+        Xb = Xb.to(device)
         yb = yb.to(device)
 
-        optimizer.zero_grad(set_to_none=True)
-        logits = model(xb)
-        loss = F.cross_entropy(logits, yb)
+        optimizer.zero_grad()
+        logits = model(Xb)
+        loss = criterion(logits, yb)
         loss.backward()
-
-        if grad_clip is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-
         optimizer.step()
 
-        losses.append(loss.item())
-        pred = torch.argmax(logits, dim=1)
+        total_loss += float(loss.item())
+        pred = logits.argmax(dim=1)
         correct += int((pred == yb).sum().item())
         total += int(yb.numel())
 
-    return {"loss": float(np.mean(losses)), "acc": float(correct / max(total, 1))}
+    return total_loss / max(1, len(dataloader)), correct / max(1, total)
+
+
+@torch.no_grad()
+def evaluate_full(model, dataloader, criterion, device: str) -> Dict[str, np.ndarray]:
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+
+    ys, preds, probs = [], [], []
+
+    for Xb, yb in dataloader:
+        Xb = Xb.to(device)
+        yb = yb.to(device)
+
+        logits = model(Xb)
+        loss = criterion(logits, yb)
+        total_loss += float(loss.item())
+
+        p = F.softmax(logits, dim=1)
+        pred = p.argmax(dim=1)
+
+        ys.append(yb.detach().cpu().numpy())
+        preds.append(pred.detach().cpu().numpy())
+        probs.append(p.detach().cpu().numpy())
+
+        correct += int((pred == yb).sum().item())
+        total += int(yb.numel())
+
+    out = {
+        "loss": np.array(total_loss / max(1, len(dataloader)), dtype=float),
+        "acc": np.array(correct / max(1, total), dtype=float),
+        "y": np.concatenate(ys) if ys else np.array([], dtype=int),
+        "pred": np.concatenate(preds) if preds else np.array([], dtype=int),
+        "prob": np.concatenate(probs) if probs else np.zeros((0, 2), dtype=float),
+    }
+    return out

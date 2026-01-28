@@ -1,225 +1,315 @@
-from typing import Dict, Any, List, Tuple
+# experiments.py
+from __future__ import annotations
+
 import copy
+from typing import Dict, Any, List, Tuple, Optional
+
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
-import data as data_mod
-import normalize as norm_mod
-from models import make_eegnet
-from train_utils import make_loader, train_one_epoch, evaluate
+from config import Config
+from data import load_di_data_train_only_norm, load_loso_subject_epochs_subjectwise_norm
+from models import build_model
+from train_utils import train_one_epoch, evaluate_full
 
-def _init_model_and_baseline(cfg, device, n_chans, n_times, n_classes, test_sets: Dict[int, Tuple[np.ndarray, np.ndarray]]):
-    model = make_eegnet(n_chans, n_times, n_classes, drop_prob=0.0).to(device)
+
+# ---------------------------
+# Dataset
+# ---------------------------
+class EEGDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.as_tensor(X, dtype=torch.float32)
+        self.y = torch.as_tensor(y, dtype=torch.long)
+
+    def __len__(self):
+        return int(self.X.shape[0])
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+
+# ---------------------------
+# Utilities
+# ---------------------------
+def _device() -> str:
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def set_global_seed(seed: int) -> None:
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def _compute_baseline_b(
+    cfg: Config,
+    model_init_state: Dict[str, torch.Tensor],
+    n_chans: int,
+    n_times: int,
+    test_data: Dict[int, Dict[str, Any]],
+    device: str,
+) -> Dict[int, float]:
+    """
+    Compute b[j] = accuracy of randomly initialized model on subject j test set.
+    Matches your online DI baseline logic.
+    """
+    criterion = nn.CrossEntropyLoss()
+    model_b = build_model(cfg, n_chans=n_chans, n_times=n_times, n_classes=2).to(device)
+    model_b.load_state_dict(model_init_state)
+
+    b: Dict[int, float] = {}
+    for subj in cfg.subjects:
+        ds = EEGDataset(test_data[subj]["X"], test_data[subj]["y"])
+        ld = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
+        ev = evaluate_full(model_b, ld, criterion, device)
+        b[subj] = float(ev["acc"])
+    return b
+
+
+def _compute_final_metrics(
+    subjects: List[int],
+    rows: List[Dict[int, float]],
+    b: Dict[int, float],
+) -> Tuple[float, float, float]:
+    """
+    Compute ACC/BWT/FWT using the same definitions as your online DI code.
+    """
+    T = len(subjects)
+    R_full = np.zeros((T, T), dtype=float)
+    for i in range(T):
+        for j, subj in enumerate(subjects):
+            R_full[i, j] = rows[i][subj]
+
+    b_vec = np.array([b[s] for s in subjects], dtype=float)
+
+    ACC_final = float(np.mean(R_full[T - 1, :]))
+    BWT_final = float(np.mean([R_full[T - 1, i] - R_full[i, i] for i in range(T - 1)])) if T > 1 else 0.0
+    FWT_final = float(np.mean([R_full[i - 1, i] - b_vec[i] for i in range(1, T)])) if T > 1 else 0.0
+    return ACC_final, BWT_final, FWT_final
+
+
+# ---------------------------
+# Shared pure DIL engine
+# ---------------------------
+def _run_pure_domain_incremental(
+    cfg: Config,
+    *,
+    epochs_per_subject: int,
+    lr: Optional[float] = None,
+    weight_decay: Optional[float] = None,
+    desc: str = "DI",
+) -> Dict[str, Any]:
+    """
+    PURE domain-incremental learning:
+      - sequential subjects/domains
+      - train ONLY on the current subject (no replay, no concatenation)
+      - evaluate on all subjects at each step
+    The only intended difference between "online" and "offline" is epochs_per_subject.
+    """
+    set_global_seed(cfg.seed)
+    device = _device()
+
+    train_data, test_data = load_di_data_train_only_norm(cfg)
+
+    sample_X = train_data[cfg.subjects[0]]["X"]
+    n_chans, n_times = sample_X.shape[1], sample_X.shape[2]
+
+    model = build_model(cfg, n_chans=n_chans, n_times=n_times, n_classes=2).to(device)
     init_state = copy.deepcopy(model.state_dict())
 
-    # baseline b: evaluate random init on each subject test set
-    b = {}
-    for sid, (Xte, yte) in test_sets.items():
-        te_loader = make_loader(Xte, yte, cfg.batch_size, shuffle=False)
-        res = evaluate(model, te_loader, device)
-        b[sid] = res["acc"]
+    # Baseline b from random init
+    b = _compute_baseline_b(cfg, init_state, n_chans, n_times, test_data, device)
 
-    return model, init_state, b
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=(cfg.lr if lr is None else lr),
+        weight_decay=(cfg.weight_decay if weight_decay is None else weight_decay),
+    )
 
-def run_online_domain_incremental(cfg, device) -> Dict[str, Any]:
-    # Preload normalized train/test per subject using TRAIN-ONLY normalization
-    train_sets = {}
-    test_sets = {}
-    info0 = None
+    R: Dict[int, Dict[int, float]] = {}
+    history: List[Dict[str, Any]] = []
+    rows: List[Dict[int, float]] = []
 
-    for sid in tqdm(cfg.subjects, desc="Loading DI subjects"):
-        pack = data_mod.load_subject_train_test(
-            sid, cfg.train_runs, cfg.test_runs,
-            cfg.l_freq, cfg.h_freq, cfg.tmin, cfg.tmax,
-            resample_sfreq=cfg.resample_sfreq, picks=cfg.picks
-        )
-        Xtr, ytr, Xte, yte, info, norm_params = norm_mod.normalize_train_test_from_raw(
-            pack["raw_train"], pack["raw_test"],
-            cfg.tmin, cfg.tmax, cfg.picks,
-            cfg.do_zscore, cfg.do_minmax, cfg.eps, cfg.clip_z
-        )
-        if info0 is None:
-            info0 = info
-        train_sets[sid] = (Xtr, ytr)
-        test_sets[sid] = (Xte, yte)
+    subjects = cfg.subjects
 
-    n_chans = train_sets[cfg.subjects[0]][0].shape[1]
-    n_times = train_sets[cfg.subjects[0]][0].shape[2]
-    n_classes = 2
+    for step, train_subject in enumerate(tqdm(subjects, desc=desc, total=len(subjects))):
+        Xtr = train_data[train_subject]["X"]
+        ytr = train_data[train_subject]["y"]
 
-    model, init_state, b = _init_model_and_baseline(cfg, device, n_chans, n_times, n_classes, test_sets)
+        train_ds = EEGDataset(Xtr, ytr)
+        train_ld = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=0)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        # Train on CURRENT subject only (PURE)
+        for _ in range(epochs_per_subject):
+            train_loss, train_acc = train_one_epoch(model, train_ld, criterion, optimizer, device)
 
-    # R[i, j] stored as dict-of-dicts for easy subject indexing
-    R = {sid: {} for sid in cfg.subjects}
-    history = []
+        # Evaluate on all subjects
+        row: Dict[int, float] = {}
+        for test_subject in subjects:
+            Xte = test_data[test_subject]["X"]
+            yte = test_data[test_subject]["y"]
+            test_ds = EEGDataset(Xte, yte)
+            test_ld = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
+            ev = evaluate_full(model, test_ld, criterion, device)
+            row[test_subject] = float(ev["acc"])
 
-    for sid_train in tqdm(cfg.subjects, desc="Online DI"):
-        Xtr, ytr = train_sets[sid_train]
-        tr_loader = make_loader(Xtr, ytr, cfg.batch_size, shuffle=True)
+        rows.append(row)
+        R[train_subject] = {s: float(row[s]) for s in subjects}
 
-        # online = 1 epoch
-        tr_res = train_one_epoch(model, tr_loader, opt, device, cfg.grad_clip)
+        # Prefix metrics (same as before)
+        T = len(subjects)
+        Rm = np.full((step + 1, T), np.nan, dtype=float)
+        for i in range(step + 1):
+            for j, subj in enumerate(subjects):
+                Rm[i, j] = rows[i][subj]
+        b_vec = np.array([b[s] for s in subjects], dtype=float)
 
-        # evaluate on all test subjects
-        row = {}
-        for sid_test in cfg.subjects:
-            Xte, yte = test_sets[sid_test]
-            te_loader = make_loader(Xte, yte, cfg.batch_size, shuffle=False)
-            ev = evaluate(model, te_loader, device)
-            row[sid_test] = ev["acc"]
-            R[sid_train][sid_test] = ev["acc"]
-
-        history.append({"train_subject": sid_train, **tr_res, "row_mean_acc": float(np.mean(list(row.values()))) })
-
-    return {"experiment": "online_domain_incremental", "R": R, "b": b, "history": history, "subjects": cfg.subjects}
-
-def run_offline_domain_incremental(cfg, device) -> Dict[str, Any]:
-    train_sets = {}
-    test_sets = {}
-    info0 = None
-
-    for sid in tqdm(cfg.subjects, desc="Loading DI subjects"):
-        pack = data_mod.load_subject_train_test(
-            sid, cfg.train_runs, cfg.test_runs,
-            cfg.l_freq, cfg.h_freq, cfg.tmin, cfg.tmax,
-            resample_sfreq=cfg.resample_sfreq, picks=cfg.picks
-        )
-        Xtr, ytr, Xte, yte, info, _ = norm_mod.normalize_train_test_from_raw(
-            pack["raw_train"], pack["raw_test"],
-            cfg.tmin, cfg.tmax, cfg.picks,
-            cfg.do_zscore, cfg.do_minmax, cfg.eps, cfg.clip_z
-        )
-        if info0 is None:
-            info0 = info
-        train_sets[sid] = (Xtr, ytr)
-        test_sets[sid] = (Xte, yte)
-
-    n_chans = train_sets[cfg.subjects[0]][0].shape[1]
-    n_times = train_sets[cfg.subjects[0]][0].shape[2]
-    n_classes = 2
-
-    model, init_state, b = _init_model_and_baseline(cfg, device, n_chans, n_times, n_classes, test_sets)
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-
-    R = {sid: {} for sid in cfg.subjects}
-    history = []
-
-    for sid_train in tqdm(cfg.subjects, desc="Offline DI"):
-        Xtr, ytr = train_sets[sid_train]
-        tr_loader = make_loader(Xtr, ytr, cfg.batch_size, shuffle=True)
-
-        epoch_logs = []
-        for ep in range(cfg.offline_epochs_per_subject):
-            tr_res = train_one_epoch(model, tr_loader, opt, device, cfg.grad_clip)
-            epoch_logs.append({"epoch": ep + 1, **tr_res})
-
-        row = {}
-        for sid_test in cfg.subjects:
-            Xte, yte = test_sets[sid_test]
-            te_loader = make_loader(Xte, yte, cfg.batch_size, shuffle=False)
-            ev = evaluate(model, te_loader, device)
-            row[sid_test] = ev["acc"]
-            R[sid_train][sid_test] = ev["acc"]
+        ACC_t = float(np.nanmean(Rm[step, :]))
+        if step > 0:
+            BWT_t = float(np.mean([Rm[step, i] - Rm[i, i] for i in range(step)]))
+            FWT_t = float(np.mean([Rm[i - 1, i] - b_vec[i] for i in range(1, step + 1)]))
+        else:
+            BWT_t, FWT_t = 0.0, 0.0
 
         history.append({
-            "train_subject": sid_train,
-            "final_epoch_loss": epoch_logs[-1]["loss"],
-            "final_epoch_acc": epoch_logs[-1]["acc"],
-            "epochs": epoch_logs,
-            "row_mean_acc": float(np.mean(list(row.values())))
+            "train_subject": int(train_subject),
+            "loss": float(train_loss),
+            "acc": float(train_acc),
+            "row_mean_acc": float(ACC_t),
+            "BWT_t": float(BWT_t),
+            "FWT_t": float(FWT_t),
+            "epochs_per_subject": int(epochs_per_subject),
+            "train_size": int(Xtr.shape[0]),
         })
 
-    return {"experiment": "offline_domain_incremental", "R": R, "b": b, "history": history, "subjects": cfg.subjects}
+    ACC_final, BWT_final, FWT_final = _compute_final_metrics(subjects, rows, b)
 
-def run_loso(cfg, device) -> Dict[str, Any]:
-    # Preload each subject all-runs (already filtered+epoched)
-    subj_data = {}
-    for sid in tqdm(cfg.subjects, desc="Loading LOSO subjects"):
-        pack = data_mod.load_subject_all_runs(
-            sid, cfg.loso_runs,
-            cfg.l_freq, cfg.h_freq, cfg.tmin, cfg.tmax,
-            resample_sfreq=cfg.resample_sfreq, picks=cfg.picks
+    return {
+        "subjects": subjects,
+        "b": b,
+        "R": R,
+        "history": history,
+        "ACC_final": ACC_final,
+        "BWT_final": BWT_final,
+        "FWT_final": FWT_final,
+    }
+
+
+# ---------------------------
+# Public experiments
+# ---------------------------
+def online_domain_incremental(cfg: Config) -> Dict[str, Any]:
+    out = _run_pure_domain_incremental(
+        cfg,
+        epochs_per_subject=cfg.online_epochs_per_subject,
+        desc="Online DI",
+    )
+    out["experiment"] = "online_domain_incremental"
+    return out
+
+
+def offline_domain_incremental(cfg: Config) -> Dict[str, Any]:
+    """
+    PURE offline DIL: identical to online except epochs_per_subject (offline = more epochs).
+    """
+    offline_lr = getattr(cfg, "offline_lr", cfg.offline_lr)
+    offline_wd = getattr(cfg, "offline_weight_decay", cfg.offline_weight_decay)
+
+    out = _run_pure_domain_incremental(
+        cfg,
+        epochs_per_subject=cfg.offline_epochs_per_subject,
+        lr=offline_lr,
+        weight_decay=offline_wd,
+        desc="Offline DI (pure)",
+    )
+    out["experiment"] = "offline_domain_incremental"
+    return out
+
+
+def loso(cfg: Config) -> Dict[str, Any]:
+    """
+    LOSO: per-subject RAW normalization before epoching + EEGNet + PyTorch training.
+
+    Output format matches plots.py:
+      out["fold_results"] list of dict with test_subject, test_acc, test_loss
+      out["fold_predictions"] dict[str(sid)] -> {y, pred, prob}
+    """
+    set_global_seed(cfg.seed)
+    device = _device()
+
+    # LOSO-specific hyperparams if present
+    loso_lr = getattr(cfg, "loso_lr", cfg.lr)
+    loso_wd = getattr(cfg, "loso_weight_decay", cfg.weight_decay)
+    loso_bs = getattr(cfg, "loso_batch_size", cfg.batch_size)
+    loso_epochs = getattr(cfg, "loso_epochs", cfg.loso_epochs)
+    loso_num_workers = getattr(cfg, "loso_num_workers", 0)
+    pin_memory = (device == "cuda")
+
+    # Precompute subject-wise normalized epochs once
+    X_by_subj: Dict[int, np.ndarray] = {}
+    y_by_subj: Dict[int, np.ndarray] = {}
+    for s in cfg.subjects:
+        Xs, ys, _ = load_loso_subject_epochs_subjectwise_norm(cfg, s)
+        X_by_subj[s] = Xs
+        y_by_subj[s] = ys
+
+    any_s = cfg.subjects[0]
+    n_chans, n_times = X_by_subj[any_s].shape[1], X_by_subj[any_s].shape[2]
+
+    fold_results: List[Dict[str, Any]] = []
+    fold_predictions: Dict[str, Dict[str, Any]] = {}
+
+    for test_subject in tqdm(cfg.subjects, desc="LOSO folds", total=len(cfg.subjects)):
+        Xtr = np.concatenate([X_by_subj[s] for s in cfg.subjects if s != test_subject], axis=0)
+        ytr = np.concatenate([y_by_subj[s] for s in cfg.subjects if s != test_subject], axis=0)
+        Xte = X_by_subj[test_subject]
+        yte = y_by_subj[test_subject]
+
+        model = build_model(cfg, n_chans=n_chans, n_times=n_times, n_classes=2).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=loso_lr, weight_decay=loso_wd)
+
+        train_ds = EEGDataset(Xtr, ytr)
+        train_ld = DataLoader(
+            train_ds, batch_size=loso_bs, shuffle=True,
+            num_workers=loso_num_workers, pin_memory=pin_memory
         )
-        subj_data[sid] = pack
+        test_ds = EEGDataset(Xte, yte)
+        test_ld = DataLoader(
+            test_ds, batch_size=loso_bs, shuffle=False,
+            num_workers=loso_num_workers, pin_memory=pin_memory
+        )
 
-    # Infer sizes
-    any_sid = cfg.subjects[0]
-    X0 = subj_data[any_sid]["X"]
-    n_chans, n_times = X0.shape[1], X0.shape[2]
-    n_classes = 2
+        for _ in tqdm(range(loso_epochs), desc=f"  Train fold {test_subject}", leave=False):
+            train_loss, train_acc = train_one_epoch(model, train_ld, criterion, optimizer, device)
 
-    # Fixed init weights for every fold (fair)
-    base_model = make_eegnet(n_chans, n_times, n_classes, drop_prob=0.0).to(device)
-    init_state = copy.deepcopy(base_model.state_dict())
-
-    fold_results = []
-    fold_predictions = {}
-
-    for sid_test in tqdm(cfg.subjects, desc="LOSO folds"):
-        # Build pooled train raw epochs arrays
-        X_train_list, y_train_list = [], []
-        for sid in cfg.subjects:
-            if sid == sid_test:
-                continue
-            X_train_list.append(subj_data[sid]["X"])
-            y_train_list.append(subj_data[sid]["y"])
-        Xtr = np.concatenate(X_train_list, axis=0)
-        ytr = np.concatenate(y_train_list, axis=0)
-
-        Xte = subj_data[sid_test]["X"]
-        yte = subj_data[sid_test]["y"]
-
-        # TRAIN-ONLY normalization for LOSO:
-        # Fit from Xtr, apply to Xtr and Xte (same logic as normalize.py, but we reuse apply fn)
-        # We'll simulate "fit on train" stats in trial-space.
-        # (This is equivalent to train-only normalization, just without raw objects.)
-        from normalize import _compute_channel_stats, _compute_channel_minmax, apply_normalizer_to_xy
-
-        params = {"do_zscore": cfg.do_zscore, "do_minmax": cfg.do_minmax, "eps": cfg.eps, "clip_z": cfg.clip_z}
-        x_tmp = Xtr.astype(np.float32)
-
-        if cfg.do_zscore:
-            stats = _compute_channel_stats(x_tmp, cfg.eps)
-            params.update(stats)
-            xz = (x_tmp - stats["mean"]) / stats["std"]
-            if cfg.clip_z is not None:
-                xz = np.clip(xz, -cfg.clip_z, cfg.clip_z)
-        else:
-            xz = x_tmp
-
-        if cfg.do_minmax:
-            mm = _compute_channel_minmax(xz)
-            params.update(mm)
-
-        Xtr_n = apply_normalizer_to_xy(Xtr, params)
-        Xte_n = apply_normalizer_to_xy(Xte, params)
-
-        tr_loader = make_loader(Xtr_n, ytr, cfg.batch_size, shuffle=True)
-        te_loader = make_loader(Xte_n, yte, cfg.batch_size, shuffle=False)
-
-        model = make_eegnet(n_chans, n_times, n_classes, drop_prob=0.0).to(device)
-        model.load_state_dict(init_state)
-
-        opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-
-        # Train for cfg.loso_epochs
-        train_curve = []
-        for ep in range(cfg.loso_epochs):
-            tr_res = train_one_epoch(model, tr_loader, opt, device, cfg.grad_clip)
-            train_curve.append({"epoch": ep + 1, **tr_res})
-
-        ev = evaluate(model, te_loader, device)
-
+        ev = evaluate_full(model, test_ld, criterion, device)
         fold_results.append({
-            "test_subject": sid_test,
-            "test_acc": ev["acc"],
-            "test_loss": ev["loss"],
-            "train_last_loss": train_curve[-1]["loss"],
-            "train_last_acc": train_curve[-1]["acc"],
+            "test_subject": int(test_subject),
+            "test_acc": float(ev["acc"]),
+            "test_loss": float(ev["loss"]),
         })
-        fold_predictions[sid_test] = {"y": ev["y"], "pred": ev["pred"], "prob": ev["prob"], "train_curve": train_curve}
 
-    return {"experiment": "loso", "fold_results": fold_results, "fold_predictions": fold_predictions, "subjects": cfg.subjects}
+        # Keep numpy arrays in memory; run.py's JSON saver can serialize them
+        fold_predictions[str(test_subject)] = {
+            "y": ev["y"].astype(int),
+            "pred": ev["pred"].astype(int),
+            "prob": ev["prob"].astype(float),
+        }
+
+    return {
+        "experiment": "loso",
+        "subjects": cfg.subjects,
+        "fold_results": fold_results,
+        "fold_predictions": fold_predictions,
+    }

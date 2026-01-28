@@ -1,52 +1,74 @@
-from dataclasses import dataclass
-from typing import List, Optional
+# config.py
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict
+
 
 @dataclass
 class Config:
-    # Dataset / protocol
-    subjects: List[int] = None
-    train_runs: List[int] = None          # used by domain-incremental
-    test_runs: List[int] = None           # used by domain-incremental
-    loso_runs: List[int] = None           # used by LOSO
+    # -----------------------
+    # DATA
+    # -----------------------
+    data_path: str = "~/mne_data/"
+    subjects: List[int] = field(default_factory=lambda: list(range(1, 81)))
 
-    # Epoching
+    # Domain-Incremental (DI) protocol (matches better code)
+    di_train_runs: List[int] = field(default_factory=lambda: [4, 8])
+    di_test_runs: List[int] = field(default_factory=lambda: [12])
+
+    # LOSO protocol (cross-sub style: use all runs)
+    loso_runs: List[int] = field(default_factory=lambda: [4, 8, 12])
+
+    # -----------------------
+    # PREPROCESSING
+    # -----------------------
+    ablation_mode: str = "normal"  # "normal" or "highpass80"
+
+    # DI filter (match better code: 1–50 Hz)
+    di_l_freq: float = 1.0
+    di_h_freq: Optional[float] = 79.0
+
+    # LOSO filter (cross-sub style typically uses 1–80 Hz)
+    loso_l_freq: float = 1.0
+    loso_h_freq: Optional[float] = 79.0
+
+    resample_sfreq: Optional[float] = None
+
+    # Epoch window (match better code)
     tmin: float = -0.5
     tmax: float = 4.1
 
-    # Preprocessing
-    l_freq: float = 1.0
-    # High cutoff must be strictly less than Nyquist (sfreq/2); for 160 Hz data, use < 80
-    h_freq: float = 79.0                 # baseline choice: 1–79 Hz (avoids Nyquist=80 Hz)
-    resample_sfreq: Optional[float] = None  # e.g. 160.0 or None
-    picks: str = "eeg"                   # MNE picks
+    # Event mapping (match better code)
+    event_id: Dict[str, int] = field(default_factory=lambda: dict(left=2, right=3))
 
-    # Normalization (TRAIN-ONLY)
-    do_zscore: bool = True
-    do_minmax: bool = True
-    eps: float = 1e-8
-    clip_z: Optional[float] = None       # e.g. 5.0 or None
+    # -----------------------
+    # NORMALIZATION
+    # -----------------------
+    # RAW-based normalization params
+    norm_eps: float = 1e-10
 
-    # Training
-    seed: int = 42
-    device: str = "cuda"                 # "cuda" or "cpu"
-    batch_size: int = 16
-    lr: float = 1e-3
+    # -----------------------
+    # MODEL (EEGNet as requested)
+    # -----------------------
+    drop_prob: float = 0.0
+
+    # -----------------------
+    # TRAINING (match better code for DI)
+    # -----------------------
+    lr: float = 1e-2
     weight_decay: float = 1e-3
-    grad_clip: Optional[float] = 1.0
-
-    # Experiments
+    batch_size: int = 8
+    offline_lr: float = 1e-3
+    offline_weight_decay: float = 1e-1
     online_epochs_per_subject: int = 1
-    offline_epochs_per_subject: int = 15  
+    offline_epochs_per_subject: int = 10
+
+    # LOSO training
+    loso_lr: float = 1e-4              # smaller LR helps stability
+    loso_batch_size: int = 64            # speed + smoother gradients
     loso_epochs: int = 30
 
-    # Output
-    out_dir: str = "outputs"
-    run_name: str = "baseline"
-
-def default_config() -> Config:
-    return Config(
-        subjects=list(range(1, 11)),
-        train_runs=[4, 8],
-        test_runs=[12],
-        loso_runs=[4, 8, 12],
-    )
+    # -----------------------
+    # OUTPUT / REPRO
+    # -----------------------
+    output_dir: str = "outputs"
+    seed: int = 42
