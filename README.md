@@ -182,6 +182,8 @@ results are stored in:
 
 Key fields used to fill the ablation table: - `ACC_final` -
 `FWT_final` - `BWT_final`
+<img width="698" height="629" alt="image" src="https://github.com/user-attachments/assets/db17984b-41f2-4e5f-932c-c3affb87b2e6" />
+
 
 ------------------------------------------------------------------------
 
