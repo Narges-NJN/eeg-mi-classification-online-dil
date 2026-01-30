@@ -16,7 +16,7 @@ outputs/
 mne_data/
 *.edf
 *.fif
-submit_online_ablation.sbatch
+*.sbatch
 slurm_logs/
 
 # Jupyter (if any)

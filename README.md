@@ -1,85 +1,190 @@
 # Continual Learning for Motor Imagery EEG
+
 ## Online and Offline Domain-Incremental Learning with EEGNet
 
 ## Abstract
-This repository provides a modular experimental framework for studying continual learning in Motor Imagery EEG (MI‑EEG) using the PhysioNet EEG Motor Movement/Imagery dataset (EEGBCI), accessed via Braindecode/MNE. The framework supports (i) Leave‑One‑Subject‑Out (LOSO), (ii) Offline Domain‑Incremental Learning (Offline DIL), and (iii) Online Domain‑Incremental Learning (Online DIL). Performance is reported using final average accuracy (ACC) and continual‑learning transfer metrics (BWT, FWT).
+
+This repository provides a modular experimental framework for studying
+continual learning in Motor Imagery EEG (MI-EEG) using the PhysioNet EEG
+Motor Movement/Imagery dataset (EEGBCI), accessed via Braindecode/MNE.
+The framework supports (i) Leave-One-Subject-Out (LOSO), (ii) Offline
+Domain-Incremental Learning (Offline DIL), and (iii) Online
+Domain-Incremental Learning (Online DIL). Performance is reported using
+final average accuracy (ACC) and continual-learning transfer metrics
+(BWT, FWT).
 
 ## Dataset
-The EEGBCI dataset is downloaded and cached automatically through Braindecode/MNE on first run (no manual download required). Default subject range and run selection are defined in `config.py`.
+
+The EEGBCI dataset is downloaded and cached automatically through
+Braindecode/MNE on first run (no manual download required). Default
+subject range and run selection are defined in `config.py`.
 
 ## Installation
+
 Install dependencies from `requirements.txt`:
 
-```bash
+``` bash
 pip install -r requirements.txt
 ```
 
 ## Reproducibility
+
 All reported experiments use the default random seed:
 
-- `seed = 42`
+-   `seed = 42`
 
 (Seed is configurable via `--set seed=<int>`.)
 
 ## Baseline Configuration (Online DIL)
+
 The baseline used for the Online DIL ablation study is:
 
-| Hyperparameter | Value |
-|---|---:|
-| learning rate | 1e-2 |
-| weight decay | 0 |
-| batch size | 4 |
-| dropout | 0.0 |
-| temporal filters (F1) | 8 |
-| spatial filters (D) | 1 |
-| temporal kernel length | 16 |
-| depthwise kernel length | 8 |
-| pooling mode | mean |
+  Hyperparameter              Value
+  ------------------------- -------
+  learning rate                1e-2
+  weight decay                    0
+  batch size                      4
+  dropout                       0.0
+  temporal filters (F1)           8
+  spatial filters (D)             1
+  temporal kernel length         16
+  depthwise kernel length         8
+  pooling mode                 mean
 
 ## Running Experiments
+
 All experiments are executed via `run.py`.
 
-### 1) Online Domain‑Incremental Learning (Online DIL)
+### 1) Online Domain-Incremental Learning (Online DIL)
+
 Baseline:
-```bash
+
+``` bash
 python run.py --exp online --ablation baseline
 ```
 
-### 2) Offline Domain‑Incremental Learning (Offline DIL)
-```bash
+### 2) Offline Domain-Incremental Learning (Offline DIL)
+
+``` bash
 python run.py --exp offline
 ```
 
-### 3) Leave‑One‑Subject‑Out (LOSO)
-```bash
+### 3) Leave-One-Subject-Out (LOSO)
+
+``` bash
 python run.py --exp loso
 ```
 
 ## Online DIL Ablations
-Ablations are defined as named presets in `run.py` and each changes **one** hyperparameter relative to the baseline.
+
+Ablations are defined as named presets in `run.py` and each changes
+**one** hyperparameter relative to the baseline.
 
 Example:
-```bash
+
+``` bash
 python run.py --exp online --ablation lr_1e-3
 ```
 
 ### Ablation presets (Online DIL)
-- **Learning rate**: `lr_5e-4`, `lr_1e-3`, `lr_5e-3`, `lr_3e-2`
-- **Weight decay**: `wd_1e-4`, `wd_1e-3`, `wd_1e-2`
-- **Batch size**: `bs_8`, `bs_16`, `bs_32`
-- **Dropout**: `drop_0.10`, `drop_0.25`, `drop_0.50`
-- **Temporal filters (F1)**: `F1_16`, `F1_32`
-- **Spatial filters (D)**: `D_2`, `D_4`, `D_8`
-- **Temporal kernel length**: `klen_32`, `klen_64`, `klen_128`
-- **Depthwise kernel length**: `dwklen_16`, `dwklen_32`, `dwklen_64`
-- **Pooling mode**: `pool_max`
+
+-   **Learning rate**: `lr_5e-4`, `lr_1e-3`, `lr_5e-3`, `lr_3e-2`
+-   **Weight decay**: `wd_1e-4`, `wd_1e-3`, `wd_1e-2`
+-   **Batch size**: `bs_8`, `bs_16`, `bs_32`
+-   **Dropout**: `drop_0.10`, `drop_0.25`, `drop_0.50`
+-   **Temporal filters (F1)**: `F1_16`, `F1_32`
+-   **Spatial filters (D)**: `D_2`, `D_4`, `D_8`
+-   **Temporal kernel length**: `klen_32`, `klen_64`, `klen_128`
+-   **Depthwise kernel length**: `dwklen_16`, `dwklen_32`, `dwklen_64`
+-   **Pooling mode**: `pool_max`
+
+------------------------------------------------------------------------
+
+## Custom Hyperparameter Runs
+
+In addition to predefined ablation presets, experiments can be executed
+with fully custom hyperparameters using the `--set` argument.
+
+The `--set` flag allows overriding any configuration parameter defined
+in `config.py`.
+
+### General Syntax
+
+``` bash
+python run.py --exp online --ablation baseline --set key1=value1 key2=value2 ...
+```
+
+Each `key=value` pair overrides the corresponding baseline
+configuration.
+
+------------------------------------------------------------------------
+
+### Example: Custom Learning Rate + Kernel + Filters
+
+``` bash
+python run.py --exp online --ablation baseline \
+  --set lr=1e-3 kernel_length=32 D=2
+```
+
+------------------------------------------------------------------------
+
+### Example: Multiple Architectural Changes
+
+``` bash
+python run.py --exp online --ablation baseline \
+  --set F1=32 D=4 depthwise_kernel_length=64 drop_prob=0.25
+```
+
+------------------------------------------------------------------------
+
+### Example: Custom Pooling and Batch Size
+
+``` bash
+python run.py --exp online --ablation baseline \
+  --set pool_mode=max batch_size=16
+```
+
+------------------------------------------------------------------------
+
+### Available Keys for `--set`
+
+**Training parameters** - `lr` - `weight_decay` - `batch_size` -
+`drop_prob` - `seed` - `subjects`
+
+**Architectural parameters** - `F1` (temporal filters) - `D` (spatial
+filters) - `kernel_length` - `depthwise_kernel_length` - `pool_mode`
+(`mean` or `max`)
+
+------------------------------------------------------------------------
+
+### Notes
+
+-   `--set` values always override the selected `--ablation` preset.
+-   To run a fully custom configuration, use `--ablation baseline` and
+    specify all desired overrides via `--set`.
+-   Subjects can be specified as a comma-separated list:
+
+``` bash
+--set subjects=1,2,3,4,5
+```
+
+This mechanism enables flexible experimentation beyond predefined
+ablation configurations while maintaining reproducibility.
+
+------------------------------------------------------------------------
 
 ## Outputs
-Each run writes an output folder under `outputs/`. For Online DIL, results are stored in:
-- `outputs/<tag>/online_domain_incremental/results.json`
 
-Key fields used to fill the ablation table:
-- `ACC_final`, `FWT_final`, `BWT_final`
+Each run writes an output folder under `outputs/`. For Online DIL,
+results are stored in:
+
+    outputs/<tag>/online_domain_incremental/results.json
+
+Key fields used to fill the ablation table: - `ACC_final` -
+`FWT_final` - `BWT_final`
+
+------------------------------------------------------------------------
 
 ## Author
+
 Narges Najiantabriz
