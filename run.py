@@ -13,50 +13,57 @@ from utils import ensure_dir, save_json
 
 
 # ---------------------------
-# Ablation presets (Table 4.1 – Online DI, EEGNet)
+# Ablation presets (Online DI, EEGNet) — updated to match latest table
+# Baseline (in config.py):
+# lr=1e-2, weight_decay=0, batch_size=4, drop_prob=0
+# F1=8, D=1, kernel_length=16, depthwise_kernel_length=8, pool_mode=mean
 # ---------------------------
 ABLATION_CASES = {
     # Baseline
     "baseline": {},
 
     # Learning rate
+    "lr_5e-4": {"lr": "5e-4"},
     "lr_1e-3": {"lr": "1e-3"},
+    "lr_5e-3": {"lr": "5e-3"},
     "lr_3e-2": {"lr": "3e-2"},
 
-    # Weight decay
-    "wd_0": {"weight_decay": "0"},
+    # Weight decay (baseline is 0)
     "wd_1e-4": {"weight_decay": "1e-4"},
+    "wd_1e-3": {"weight_decay": "1e-3"},
     "wd_1e-2": {"weight_decay": "1e-2"},
 
-    # Batch size
-    "bs_4": {"batch_size": "4"},
+    # Batch size (baseline is 4)
+    "bs_8": {"batch_size": "8"},
     "bs_16": {"batch_size": "16"},
+    "bs_32": {"batch_size": "32"},
 
-    # Dropout
+    # Dropout (baseline is 0)
+    "drop_0.10": {"drop_prob": "0.10"},
     "drop_0.25": {"drop_prob": "0.25"},
     "drop_0.50": {"drop_prob": "0.50"},
 
-    # Temporal filters (F1)
-    "F1_4": {"F1": "4"},
+    # Temporal filters (F1) (baseline is 8)
     "F1_16": {"F1": "16"},
+    "F1_32": {"F1": "32"},
 
-    # Spatial filters (D)
-    "D_1": {"D": "1"},
+    # Spatial filters (D) (baseline is 1)
+    "D_2": {"D": "2"},
     "D_4": {"D": "4"},
+    "D_8": {"D": "8"},
 
-    # Temporal kernel length
+    # Temporal kernel length (baseline is 16)
     "klen_32": {"kernel_length": "32"},
+    "klen_64": {"kernel_length": "64"},
     "klen_128": {"kernel_length": "128"},
 
-    # Depthwise kernel length
-    "dwklen_8": {"depthwise_kernel_length": "8"},
+    # Depthwise kernel length (baseline is 8)
+    "dwklen_16": {"depthwise_kernel_length": "16"},
     "dwklen_32": {"depthwise_kernel_length": "32"},
+    "dwklen_64": {"depthwise_kernel_length": "64"},
 
     # Pooling mode
     "pool_max": {"pool_mode": "max"},
-
-    # BatchNorm momentum
-    "bnmom_0.10": {"batch_norm_momentum": "0.10"},
 }
 
 

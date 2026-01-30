@@ -52,11 +52,11 @@ class Config:
     drop_prob: float = 0.0
 
     # EEGNet architectural hyperparameters (for ablations)
-    # Baseline values correspond to Table 4.1 (Online DI, EEGNet)
+    # Baseline values correspond to the updated ablation table (Online DI, EEGNet)
     F1: int = 8
-    D: int = 2
-    kernel_length: int = 64
-    depthwise_kernel_length: int = 16
+    D: int = 1
+    kernel_length: int = 16
+    depthwise_kernel_length: int = 8
     pool_mode: str = "mean"  # "mean" or "max"
     batch_norm_momentum: float = 0.01
 
@@ -64,8 +64,8 @@ class Config:
     # TRAINING (match better code for DI)
     # -----------------------
     lr: float = 1e-2
-    weight_decay: float = 1e-3
-    batch_size: int = 8
+    weight_decay: float = 0.0
+    batch_size: int = 4
     offline_lr: float = 1e-3
     offline_weight_decay: float = 1e-1
     online_epochs_per_subject: int = 1
@@ -73,7 +73,7 @@ class Config:
 
     # LOSO training
     loso_lr: float = 1e-4              # smaller LR helps stability
-    loso_batch_size: int = 64            # speed + smoother gradients
+    loso_batch_size: int = 64          # speed + smoother gradients
     loso_epochs: int = 30
 
     # -----------------------
