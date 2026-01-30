@@ -16,6 +16,8 @@ outputs/
 mne_data/
 *.edf
 *.fif
+submit_online_ablation.sbatch
+slurm_logs/
 
 # Jupyter (if any)
 .ipynb_checkpoints/
