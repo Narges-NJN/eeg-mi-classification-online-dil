@@ -1,0 +1,4 @@
+usage: run.py [-h] [--exp {online,offline,loso,all}] [--tag TAG]
+              [--ablation {D_2,D_4,D_8,F1_16,F1_32,baseline,bs_16,bs_32,bs_8,drop_0.10,drop_0.25,drop_0.50,dwklen_16,dwklen_32,dwklen_64,klen_128,klen_32,klen_64,lr_1e-3,lr_3e-2,lr_5e-3,lr_5e-4,pool_max,wd_1e-2,wd_1e-3,wd_1e-4}]
+              [--set [SET ...]] [--di_step_sizes DI_STEP_SIZES]
+run.py: error: unrecognized arguments: baseline

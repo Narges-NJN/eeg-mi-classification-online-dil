@@ -1,4 +1,3 @@
-# experiments.py
 from __future__ import annotations
 
 import copy
@@ -17,9 +16,6 @@ from models import build_model
 from train_utils import train_one_epoch, evaluate_full
 
 
-# ---------------------------
-# Dataset
-# ---------------------------
 class EEGDataset(Dataset):
     def __init__(self, X, y):
         self.X = torch.as_tensor(X, dtype=torch.float32)
@@ -32,9 +28,6 @@ class EEGDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-# ---------------------------
-# Utilities
-# ---------------------------
 def _device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -50,71 +43,125 @@ def set_global_seed(seed: int) -> None:
         torch.backends.cudnn.benchmark = False
 
 
-def _compute_baseline_b(
+def _make_task_groups(subjects: List[int], step_size: int) -> List[List[int]]:
+    if step_size <= 0:
+        raise ValueError(f"step_size must be >= 1, got {step_size}")
+    return [subjects[i:i + step_size] for i in range(0, len(subjects), step_size)]
+
+
+def _concat_train_data_for_subjects(train_data: Dict[int, Dict[str, Any]], group: List[int]):
+    Xs, ys = [], []
+    for s in group:
+        Xs.append(train_data[s]["X"])
+        ys.append(train_data[s]["y"])
+    X = np.concatenate(Xs, axis=0) if len(Xs) > 1 else Xs[0]
+    y = np.concatenate(ys, axis=0) if len(ys) > 1 else ys[0]
+    return X, y
+
+
+def _compute_baseline_b_task(
     cfg: Config,
     model_init_state: Dict[str, torch.Tensor],
     n_chans: int,
     n_times: int,
     test_data: Dict[int, Dict[str, Any]],
+    task_groups: List[List[int]],
     device: str,
 ) -> Dict[int, float]:
-    """
-    Compute b[j] = accuracy of randomly initialized model on subject j test set.
-    Matches your online DI baseline logic.
-    """
     criterion = nn.CrossEntropyLoss()
     model_b = build_model(cfg, n_chans=n_chans, n_times=n_times, n_classes=2).to(device)
     model_b.load_state_dict(model_init_state)
 
-    b: Dict[int, float] = {}
-    for subj in cfg.subjects:
-        ds = EEGDataset(test_data[subj]["X"], test_data[subj]["y"])
-        ld = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
-        ev = evaluate_full(model_b, ld, criterion, device)
-        b[subj] = float(ev["acc"])
-    return b
+    b_task: Dict[int, float] = {}
+    for t, group in enumerate(task_groups):
+        accs = []
+        for subj in group:
+            ds = EEGDataset(test_data[subj]["X"], test_data[subj]["y"])
+            ld = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
+            ev = evaluate_full(model_b, ld, criterion, device)
+            accs.append(float(ev["acc"]))
+        b_task[t] = float(np.mean(accs)) if accs else 0.0
+    return b_task
 
 
-def _compute_final_metrics(
-    subjects: List[int],
-    rows: List[Dict[int, float]],
-    b: Dict[int, float],
+def _rows_subject_to_task(
+    rows_subject: List[Dict[int, float]],
+    task_groups: List[List[int]],
+) -> List[Dict[int, float]]:
+    rows_task: List[Dict[int, float]] = []
+    for row in rows_subject:
+        rt: Dict[int, float] = {}
+        for t, group in enumerate(task_groups):
+            rt[t] = float(np.mean([row[s] for s in group]))
+        rows_task.append(rt)
+    return rows_task
+
+
+def _compute_final_metrics_task(
+    n_tasks: int,
+    rows_task: List[Dict[int, float]],
+    b_task: Dict[int, float],
 ) -> Tuple[float, float, float]:
     """
-    Compute ACC/BWT/FWT using the same definitions as your online DI code.
+    --- FIX ---
+    Compute metrics robustly even if we don't have a perfect T x T (e.g., interrupted runs).
+    Previously you forced BWT/FWT to 0 unless len(rows_task) == T.
     """
-    T = len(subjects)
-    R_full = np.zeros((T, T), dtype=float)
-    for i in range(T):
-        for j, subj in enumerate(subjects):
-            R_full[i, j] = rows[i][subj]
+    T = n_tasks
+    if len(rows_task) == 0:
+        return float("nan"), 0.0, 0.0
 
-    b_vec = np.array([b[s] for s in subjects], dtype=float)
+    R_full = np.full((len(rows_task), T), np.nan, dtype=float)
+    for i in range(len(rows_task)):
+        for t in range(T):
+            # rows_task[i] should contain every task key; use .get for safety
+            R_full[i, t] = float(rows_task[i].get(t, np.nan))
 
-    ACC_final = float(np.mean(R_full[T - 1, :]))
-    BWT_final = float(np.mean([R_full[T - 1, i] - R_full[i, i] for i in range(T - 1)])) if T > 1 else 0.0
-    FWT_final = float(np.mean([R_full[i - 1, i] - b_vec[i] for i in range(1, T)])) if T > 1 else 0.0
+    b_vec = np.array([float(b_task.get(t, np.nan)) for t in range(T)], dtype=float)
+
+    last = len(rows_task) - 1
+    ACC_final = float(np.nanmean(R_full[last, :]))
+
+    if T <= 1:
+        return ACC_final, 0.0, 0.0
+
+    # BWT needs diagonal R[i,i] and last row R[last,i]
+    max_i_for_bwt = min(T - 1, last)  # i in [0..T-2], but also must have row i
+    if max_i_for_bwt >= 0:
+        diffs = []
+        for i in range(max_i_for_bwt + 1):
+            if i >= T - 1:
+                break
+            a = R_full[last, i]
+            d = R_full[i, i]
+            if np.isfinite(a) and np.isfinite(d):
+                diffs.append(a - d)
+        BWT_final = float(np.mean(diffs)) if diffs else 0.0
+    else:
+        BWT_final = 0.0
+
+    # FWT uses R[i-1,i] - b[i] for i=1..T-1, but we need rows up to i-1
+    max_i_for_fwt = min(T - 1, last)  # i requires row (i-1) so last>=i-1
+    diffs = []
+    for i in range(1, max_i_for_fwt + 1):
+        prev = R_full[i - 1, i]
+        base = b_vec[i]
+        if np.isfinite(prev) and np.isfinite(base):
+            diffs.append(prev - base)
+    FWT_final = float(np.mean(diffs)) if diffs else 0.0
+
     return ACC_final, BWT_final, FWT_final
 
 
-# ---------------------------
-# Shared pure DIL engine
-# ---------------------------
 def _run_pure_domain_incremental(
     cfg: Config,
     *,
     epochs_per_subject: int,
     lr: Optional[float] = None,
     weight_decay: Optional[float] = None,
+    step_size: int = 1,
     desc: str = "DI",
 ) -> Dict[str, Any]:
-    """
-    PURE domain-incremental learning:
-      - sequential subjects/domains
-      - train ONLY on the current subject (no replay, no concatenation)
-      - evaluate on all subjects at each step
-    The only intended difference between "online" and "offline" is epochs_per_subject.
-    """
     set_global_seed(cfg.seed)
     device = _device()
 
@@ -126,8 +173,11 @@ def _run_pure_domain_incremental(
     model = build_model(cfg, n_chans=n_chans, n_times=n_times, n_classes=2).to(device)
     init_state = copy.deepcopy(model.state_dict())
 
-    # Baseline b from random init
-    b = _compute_baseline_b(cfg, init_state, n_chans, n_times, test_data, device)
+    subjects = cfg.subjects
+    task_groups = _make_task_groups(subjects, step_size)
+    n_tasks = len(task_groups)
+
+    b_task = _compute_baseline_b_task(cfg, init_state, n_chans, n_times, test_data, task_groups, device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(
@@ -136,82 +186,80 @@ def _run_pure_domain_incremental(
         weight_decay=(cfg.weight_decay if weight_decay is None else weight_decay),
     )
 
-    R: Dict[int, Dict[int, float]] = {}
+    rows_subject: List[Dict[int, float]] = []
     history: List[Dict[str, Any]] = []
-    rows: List[Dict[int, float]] = []
+    R_task: Dict[int, Dict[int, float]] = {}
+    acc_seen_tasks: List[float] = []
 
-    subjects = cfg.subjects
-
-    for step, train_subject in enumerate(tqdm(subjects, desc=desc, total=len(subjects))):
-        Xtr = train_data[train_subject]["X"]
-        ytr = train_data[train_subject]["y"]
-
+    for t, group in enumerate(tqdm(task_groups, desc=desc, total=n_tasks)):
+        Xtr, ytr = _concat_train_data_for_subjects(train_data, group)
         train_ds = EEGDataset(Xtr, ytr)
         train_ld = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=0)
 
-        # Train on CURRENT subject only (PURE)
         for _ in range(epochs_per_subject):
             train_loss, train_acc = train_one_epoch(model, train_ld, criterion, optimizer, device)
 
-        # Evaluate on all subjects
-        row: Dict[int, float] = {}
+        row_subj: Dict[int, float] = {}
         for test_subject in subjects:
             Xte = test_data[test_subject]["X"]
             yte = test_data[test_subject]["y"]
             test_ds = EEGDataset(Xte, yte)
             test_ld = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
             ev = evaluate_full(model, test_ld, criterion, device)
-            row[test_subject] = float(ev["acc"])
+            row_subj[test_subject] = float(ev["acc"])
+        rows_subject.append(row_subj)
 
-        rows.append(row)
-        R[train_subject] = {s: float(row[s]) for s in subjects}
+        row_task = {
+            task_i: float(np.mean([row_subj[s] for s in task_groups[task_i]]))
+            for task_i in range(n_tasks)
+        }
+        R_task[t] = row_task
 
-        # Prefix metrics (same as before)
-        T = len(subjects)
-        Rm = np.full((step + 1, T), np.nan, dtype=float)
-        for i in range(step + 1):
-            for j, subj in enumerate(subjects):
-                Rm[i, j] = rows[i][subj]
-        b_vec = np.array([b[s] for s in subjects], dtype=float)
+        acc_t_seen = float(np.mean([row_task[i] for i in range(t + 1)]))
+        acc_seen_tasks.append(acc_t_seen)
 
-        ACC_t = float(np.nanmean(Rm[step, :]))
-        if step > 0:
-            BWT_t = float(np.mean([Rm[step, i] - Rm[i, i] for i in range(step)]))
-            FWT_t = float(np.mean([Rm[i - 1, i] - b_vec[i] for i in range(1, step + 1)]))
+        if t > 0:
+            bwt_t = float(np.mean([R_task[t][i] - R_task[i][i] for i in range(t)]))
+            fwt_t = float(np.mean([R_task[i - 1][i] - b_task[i] for i in range(1, t + 1)]))
         else:
-            BWT_t, FWT_t = 0.0, 0.0
+            bwt_t, fwt_t = 0.0, 0.0
 
         history.append({
-            "train_subject": int(train_subject),
+            "train_task": int(t),
+            "train_subjects": [int(s) for s in group],
             "loss": float(train_loss),
             "acc": float(train_acc),
-            "row_mean_acc": float(ACC_t),
-            "BWT_t": float(BWT_t),
-            "FWT_t": float(FWT_t),
+            "row_mean_acc_seen_tasks": float(acc_t_seen),
+            "BWT_t": float(bwt_t),
+            "FWT_t": float(fwt_t),
             "epochs_per_subject": int(epochs_per_subject),
             "train_size": int(Xtr.shape[0]),
+            "step_size": int(step_size),
         })
 
-    ACC_final, BWT_final, FWT_final = _compute_final_metrics(subjects, rows, b)
+    rows_task = _rows_subject_to_task(rows_subject, task_groups)
+    ACC_final, BWT_final, FWT_final = _compute_final_metrics_task(n_tasks, rows_task, b_task)
+    AVG_ACC = float(np.mean(acc_seen_tasks)) if acc_seen_tasks else float("nan")
 
     return {
-        "subjects": subjects,
-        "b": b,
-        "R": R,
+        "subjects": list(range(n_tasks)),          # task indices (not raw subject ids)
+        "task_groups": task_groups,               # mapping of tasks -> subject ids
+        "b": b_task,                              # baseline per task
+        "R": R_task,                              # task->task accuracy dict
         "history": history,
+        "step_size": int(step_size),
         "ACC_final": ACC_final,
+        "AVG_ACC": AVG_ACC,
         "BWT_final": BWT_final,
         "FWT_final": FWT_final,
     }
 
 
-# ---------------------------
-# Public experiments
-# ---------------------------
 def online_domain_incremental(cfg: Config) -> Dict[str, Any]:
     out = _run_pure_domain_incremental(
         cfg,
         epochs_per_subject=cfg.online_epochs_per_subject,
+        step_size=getattr(cfg, "di_step_size", 1),
         desc="Online DI",
     )
     out["experiment"] = "online_domain_incremental"
@@ -219,17 +267,12 @@ def online_domain_incremental(cfg: Config) -> Dict[str, Any]:
 
 
 def offline_domain_incremental(cfg: Config) -> Dict[str, Any]:
-    """
-    PURE offline DIL: identical to online except epochs_per_subject (offline = more epochs).
-    """
-    offline_lr = getattr(cfg, "offline_lr", cfg.offline_lr)
-    offline_wd = getattr(cfg, "offline_weight_decay", cfg.offline_weight_decay)
-
     out = _run_pure_domain_incremental(
         cfg,
         epochs_per_subject=cfg.offline_epochs_per_subject,
-        lr=offline_lr,
-        weight_decay=offline_wd,
+        lr=cfg.offline_lr,
+        weight_decay=cfg.offline_weight_decay,
+        step_size=getattr(cfg, "di_step_size", 1),
         desc="Offline DI (pure)",
     )
     out["experiment"] = "offline_domain_incremental"
@@ -238,78 +281,71 @@ def offline_domain_incremental(cfg: Config) -> Dict[str, Any]:
 
 def loso(cfg: Config) -> Dict[str, Any]:
     """
-    LOSO: per-subject RAW normalization before epoching + EEGNet + PyTorch training.
-
-    Output format matches plots.py:
-      out["fold_results"] list of dict with test_subject, test_acc, test_loss
-      out["fold_predictions"] dict[str(sid)] -> {y, pred, prob}
+    --- FIX ---
+    Your LOSO was broken because:
+      - data.load_loso_subject_epochs_subjectwise_norm expects (cfg, subject)
+        but you called it without subject.
+      - train_utils.evaluate_full returns keys: y, pred, prob
+        but you used y_true/y_pred/y_prob.
     """
     set_global_seed(cfg.seed)
     device = _device()
 
-    # LOSO-specific hyperparams if present
-    loso_lr = getattr(cfg, "loso_lr", cfg.lr)
-    loso_wd = getattr(cfg, "loso_weight_decay", cfg.weight_decay)
-    loso_bs = getattr(cfg, "loso_batch_size", cfg.batch_size)
-    loso_epochs = getattr(cfg, "loso_epochs", cfg.loso_epochs)
-    loso_num_workers = getattr(cfg, "loso_num_workers", 0)
-    pin_memory = (device == "cuda")
-
-    # Precompute subject-wise normalized epochs once
-    X_by_subj: Dict[int, np.ndarray] = {}
-    y_by_subj: Dict[int, np.ndarray] = {}
-    for s in cfg.subjects:
-        Xs, ys, _ = load_loso_subject_epochs_subjectwise_norm(cfg, s)
-        X_by_subj[s] = Xs
-        y_by_subj[s] = ys
-
-    any_s = cfg.subjects[0]
-    n_chans, n_times = X_by_subj[any_s].shape[1], X_by_subj[any_s].shape[2]
+    criterion = nn.CrossEntropyLoss()
 
     fold_results: List[Dict[str, Any]] = []
     fold_predictions: Dict[str, Dict[str, Any]] = {}
 
-    for test_subject in tqdm(cfg.subjects, desc="LOSO folds", total=len(cfg.subjects)):
-        Xtr = np.concatenate([X_by_subj[s] for s in cfg.subjects if s != test_subject], axis=0)
-        ytr = np.concatenate([y_by_subj[s] for s in cfg.subjects if s != test_subject], axis=0)
-        Xte = X_by_subj[test_subject]
-        yte = y_by_subj[test_subject]
+    subjects = cfg.subjects
+    # Build per-subject normalized epochs
+    data: Dict[int, Dict[str, Any]] = {}
+    for s in subjects:
+        X, y, info = load_loso_subject_epochs_subjectwise_norm(cfg, s)
+        data[s] = {"X": X, "y": y, "info": info}
 
+    for test_subject in tqdm(subjects, desc="LOSO", total=len(subjects)):
+        Xtr, ytr = [], []
+        for s in subjects:
+            if s == test_subject:
+                continue
+            Xtr.append(data[s]["X"])
+            ytr.append(data[s]["y"])
+        Xtr = np.concatenate(Xtr, axis=0)
+        ytr = np.concatenate(ytr, axis=0)
+
+        Xte = data[test_subject]["X"]
+        yte = data[test_subject]["y"]
+
+        n_chans, n_times = Xtr.shape[1], Xtr.shape[2]
         model = build_model(cfg, n_chans=n_chans, n_times=n_times, n_classes=2).to(device)
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=loso_lr, weight_decay=loso_wd)
+        optimizer = optim.Adam(model.parameters(), lr=cfg.loso_lr, weight_decay=0.0)
 
         train_ds = EEGDataset(Xtr, ytr)
-        train_ld = DataLoader(
-            train_ds, batch_size=loso_bs, shuffle=True,
-            num_workers=loso_num_workers, pin_memory=pin_memory
-        )
-        test_ds = EEGDataset(Xte, yte)
-        test_ld = DataLoader(
-            test_ds, batch_size=loso_bs, shuffle=False,
-            num_workers=loso_num_workers, pin_memory=pin_memory
-        )
+        train_ld = DataLoader(train_ds, batch_size=cfg.loso_batch_size, shuffle=True, num_workers=0)
 
-        for _ in tqdm(range(loso_epochs), desc=f"  Train fold {test_subject}", leave=False):
-            train_loss, train_acc = train_one_epoch(model, train_ld, criterion, optimizer, device)
+        test_ds = EEGDataset(Xte, yte)
+        test_ld = DataLoader(test_ds, batch_size=cfg.loso_batch_size, shuffle=False, num_workers=0)
+
+        for _ in range(cfg.loso_epochs):
+            train_one_epoch(model, train_ld, criterion, optimizer, device)
 
         ev = evaluate_full(model, test_ld, criterion, device)
+
         fold_results.append({
             "test_subject": int(test_subject),
             "test_acc": float(ev["acc"]),
             "test_loss": float(ev["loss"]),
         })
 
-        # Keep numpy arrays in memory; run.py's JSON saver can serialize them
         fold_predictions[str(test_subject)] = {
-            "y": ev["y"].astype(int),
-            "pred": ev["pred"].astype(int),
-            "prob": ev["prob"].astype(float),
+            "y": [int(v) for v in ev["y"]],
+            "pred": [int(v) for v in ev["pred"]],
+            "prob": [[float(x) for x in row] for row in ev["prob"]],
         }
 
     return {
-        "experiment": "loso",
-        "subjects": cfg.subjects,
         "fold_results": fold_results,
         "fold_predictions": fold_predictions,
+        "subjects": subjects,
+        "experiment": "loso",
     }
