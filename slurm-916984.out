@@ -1,10 +1,0 @@
-/home/najiantabriz.2053031/venvs/eegmi/lib/python3.12/site-packages/torch/cuda/__init__.py:1007: UserWarning: Can't initialize NVML
-  raw_cnt = _raw_device_count_nvml()
-Online DI:   0%|          | 0/10 [00:00<?, ?it/s]Online DI:  10%|█         | 1/10 [00:02<00:18,  2.02s/it]Online DI:  20%|██        | 2/10 [00:02<00:08,  1.04s/it]Online DI:  30%|███       | 3/10 [00:02<00:05,  1.36it/s]Online DI:  40%|████      | 4/10 [00:03<00:03,  1.70it/s]Online DI:  50%|█████     | 5/10 [00:03<00:02,  1.98it/s]Online DI:  60%|██████    | 6/10 [00:03<00:01,  2.20it/s]Online DI:  70%|███████   | 7/10 [00:04<00:01,  2.35it/s]Online DI:  80%|████████  | 8/10 [00:04<00:00,  2.47it/s]Online DI:  90%|█████████ | 9/10 [00:04<00:00,  2.57it/s]Online DI: 100%|██████████| 10/10 [00:05<00:00,  2.64it/s]Online DI: 100%|██████████| 10/10 [00:05<00:00,  1.90it/s]
-ONLINE DI SUMMARY (step_size=1)
-  ACC: 0.6081
-  AVG: 0.5713
-  BWT: 0.0772
-  FWT: 0.0312
-
-Saved all outputs to: outputs/ablation_baseline_20260304_100705
